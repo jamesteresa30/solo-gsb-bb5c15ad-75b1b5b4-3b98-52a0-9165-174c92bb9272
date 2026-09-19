@@ -1,0 +1,110 @@
+"""请求 / 响应的 Pydantic 模型。"""
+from __future__ import annotations
+
+from enum import Enum
+from typing import List, Literal
+
+from pydantic import BaseModel, Field
+
+
+class FoldDirection(str, Enum):
+    up = "up"
+    down = "down"
+    left = "left"
+    right = "right"
+
+
+class Board(BaseModel):
+    """原始矩形板材的整数网格尺寸。"""
+
+    width: int = Field(..., gt=0, le=1_000_000, examples=[8])
+    height: int = Field(..., gt=0, le=1_000_000, examples=[4])
+
+
+class PunchPoint(BaseModel):
+    """最终折叠面上的打孔点，(0, 0) 为折叠面左上角。"""
+
+    x: int = Field(..., ge=0, examples=[1])
+    y: int = Field(..., ge=0, examples=[0])
+
+
+class UnfoldRequest(BaseModel):
+    board: Board
+    folds: List[FoldDirection] = Field(
+        default_factory=list,
+        max_length=64,
+        description="按执行顺序给出的折叠方向序列",
+    )
+    punches: List[PunchPoint] = Field(
+        ...,
+        min_length=1,
+        max_length=1024,
+        description="最终折叠面上的打孔点（局部坐标）",
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "board": {"width": 8, "height": 4},
+                    "folds": ["left", "down"],
+                    "punches": [{"x": 1, "y": 0}],
+                }
+            ]
+        }
+    }
+
+
+class PathStep(BaseModel):
+    """一次折叠中该孔位所在层的分支选择（按折叠原始顺序排列）。"""
+
+    fold: int = Field(..., description="对应请求中 folds 的下标")
+    direction: FoldDirection
+    branch: Literal["stay", "mirror"] = Field(
+        ..., description="stay=未移动的一层；mirror=被折过来的一层"
+    )
+
+
+class HolePath(BaseModel):
+    """一个展开孔位的一条来源传播路径。"""
+
+    punch: int = Field(..., description="对应请求中 punches 的下标")
+    punch_point: PunchPoint
+    steps: List[PathStep]
+
+
+class Hole(BaseModel):
+    """展开后板材上的唯一孔位。"""
+
+    x: int
+    y: int
+    layers: int = Field(..., description="覆盖该坐标的传播路径数（重合次数）")
+    paths: List[HolePath]
+
+
+class FaceRegion(BaseModel):
+    """最终折叠面在原始板材坐标系中的位置与尺寸。"""
+
+    x: int
+    y: int
+    width: int
+    height: int
+
+
+class UnfoldResponse(BaseModel):
+    board: Board
+    folds: List[FoldDirection]
+    final_face: FaceRegion
+    stack_layers: int = Field(..., description="折叠后每处的纸层数 = 2^len(folds)")
+    total_holes: int = Field(..., description="展开孔位总数（含重合，按路径计）")
+    unique_holes: int = Field(..., description="去重后的唯一孔位数")
+    holes: List[Hole]
+
+
+class ErrorDetail(BaseModel):
+    error: str
+    message: str
+
+
+class ErrorResponse(BaseModel):
+    detail: ErrorDetail
