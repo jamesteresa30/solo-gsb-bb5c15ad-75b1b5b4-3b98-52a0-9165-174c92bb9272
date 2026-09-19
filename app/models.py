@@ -55,6 +55,40 @@ class UnfoldRequest(BaseModel):
     }
 
 
+class PunchPlanRequest(BaseModel):
+    """反向打孔规划：目标孔位位于展开后的原始板材坐标系中。"""
+
+    board: Board
+    folds: List[FoldDirection] = Field(
+        default_factory=list,
+        max_length=64,
+        description="按执行顺序给出的折叠方向序列",
+    )
+    targets: List[PunchPoint] = Field(
+        ...,
+        min_length=1,
+        max_length=4096,
+        description="期望在展开板材上出现的目标孔位（原始板材坐标），重复坐标会被去重",
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "board": {"width": 8, "height": 4},
+                    "folds": ["left", "down"],
+                    "targets": [
+                        {"x": 1, "y": 1},
+                        {"x": 1, "y": 2},
+                        {"x": 6, "y": 1},
+                        {"x": 6, "y": 2},
+                    ],
+                }
+            ]
+        }
+    }
+
+
 class PathStep(BaseModel):
     """一次折叠中该孔位所在层的分支选择（按折叠原始顺序排列）。"""
 
@@ -99,6 +133,27 @@ class UnfoldResponse(BaseModel):
     total_holes: int = Field(..., description="展开孔位总数（含重合，按路径计）")
     unique_holes: int = Field(..., description="去重后的唯一孔位数")
     holes: List[Hole]
+
+
+class PunchPlanResponse(BaseModel):
+    board: Board
+    folds: List[FoldDirection]
+    targets: List[PunchPoint] = Field(
+        ..., description="去重并按 (x, y) 稳定排序后的目标孔位"
+    )
+    punches: List[PunchPoint] = Field(
+        ...,
+        description=(
+            "最小且唯一的最终折叠面打孔点列表（局部坐标，按 (x, y) 稳定排序），"
+            "其展开复算结果与 targets 完全一致"
+        ),
+    )
+    punch_count: int = Field(..., description="去重后的打孔点数量")
+    final_face: FaceRegion
+    stack_layers: int = Field(..., description="折叠后每处的纸层数 = 2^len(folds)")
+    total_holes: int = Field(..., description="打孔点展开后的孔位总数（含重合，按路径计）")
+    unique_holes: int = Field(..., description="去重后的唯一孔位数")
+    holes: List[Hole] = Field(..., description="用规划出的打孔点复算得到的展开孔位")
 
 
 class ErrorDetail(BaseModel):

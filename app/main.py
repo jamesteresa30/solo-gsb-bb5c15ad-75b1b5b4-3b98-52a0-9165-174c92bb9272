@@ -6,12 +6,19 @@ import os
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import RedirectResponse
 
-from .folding import FoldError, unfold_board
-from .models import ErrorResponse, UnfoldRequest, UnfoldResponse
+from .folding import FoldError, plan_punches, unfold_board
+from .models import (
+    ErrorResponse,
+    PunchPlanRequest,
+    PunchPlanResponse,
+    UnfoldRequest,
+    UnfoldResponse,
+)
 
 # 可通过环境变量调整的防护上限
 MAX_FOLDS = int(os.environ.get("MAX_FOLDS", "20"))
 MAX_PUNCHES = int(os.environ.get("MAX_PUNCHES", "200"))
+MAX_TARGETS = int(os.environ.get("MAX_TARGETS", "4096"))
 MAX_TOTAL_HOLES = int(os.environ.get("MAX_TOTAL_HOLES", "200000"))
 
 app = FastAPI(
@@ -73,6 +80,60 @@ def unfold(req: UnfoldRequest) -> dict:
     punches = [(p.x, p.y) for p in req.punches]
     try:
         result = unfold_board(req.board.width, req.board.height, folds, punches)
+    except FoldError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": exc.code, "message": exc.message, **exc.context},
+        ) from exc
+
+    return {"board": req.board, "folds": req.folds, **result}
+
+
+@app.post(
+    "/api/v1/punch-plan",
+    response_model=PunchPlanResponse,
+    responses={400: {"model": ErrorResponse, "description": "领域校验失败"}},
+)
+def punch_plan(req: PunchPlanRequest) -> dict:
+    if len(req.folds) > MAX_FOLDS:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "limit_exceeded",
+                "message": f"折叠步数 {len(req.folds)} 超过上限 MAX_FOLDS={MAX_FOLDS}。",
+            },
+        )
+    if len(req.targets) > MAX_TARGETS:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "limit_exceeded",
+                "message": f"目标孔位数 {len(req.targets)} 超过上限 MAX_TARGETS={MAX_TARGETS}。",
+            },
+        )
+    orbit_size = 1 << len(req.folds)
+    if orbit_size > MAX_TOTAL_HOLES:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "limit_exceeded",
+                "message": (
+                    f"单个打孔点的镜像轨道将产生 {orbit_size} 个孔位，超过上限 "
+                    f"MAX_TOTAL_HOLES={MAX_TOTAL_HOLES}，请减少折叠步数。"
+                ),
+            },
+        )
+
+    folds = [f.value for f in req.folds]
+    targets = [(p.x, p.y) for p in req.targets]
+    try:
+        result = plan_punches(
+            req.board.width,
+            req.board.height,
+            folds,
+            targets,
+            max_total_holes=MAX_TOTAL_HOLES,
+        )
     except FoldError as exc:
         raise HTTPException(
             status_code=400,

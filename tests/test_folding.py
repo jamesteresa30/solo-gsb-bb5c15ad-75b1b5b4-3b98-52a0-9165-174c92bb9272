@@ -1,7 +1,7 @@
 """核心展开逻辑测试。"""
 import pytest
 
-from app.folding import FoldError, fold_regions, unfold_board
+from app.folding import FoldError, fold_regions, plan_punches, unfold_board
 
 
 def test_unfold_left_down_known_coordinates():
@@ -111,3 +111,116 @@ def test_fold_regions_sequence():
         (0, 0, 4, 4),
         (0, 2, 4, 2),
     ]
+
+
+# ---------------------------------------------------------------------------
+# 反向打孔规划 plan_punches
+# ---------------------------------------------------------------------------
+
+
+def test_plan_roundtrip_matches_unfold_orbit():
+    orbit = [(1, 1), (1, 2), (6, 1), (6, 2)]
+    res = plan_punches(8, 4, ["left", "down"], orbit)
+    assert res["punch_count"] == 1
+    assert res["punches"] == [{"x": 1, "y": 0}]
+    # targets 稳定排序
+    assert res["targets"] == [{"x": x, "y": y} for x, y in sorted(orbit)]
+    # 复算结果与目标集合完全一致
+    assert {(h["x"], h["y"]) for h in res["holes"]} == set(orbit)
+
+
+def test_plan_targets_deduplicated():
+    res = plan_punches(
+        8,
+        4,
+        ["left", "down"],
+        [(6, 2), (1, 1), (1, 1), (6, 1), (1, 2), (6, 2)],
+    )
+    assert res["punch_count"] == 1
+    assert res["punches"] == [{"x": 1, "y": 0}]
+    assert len(res["targets"]) == 4
+
+
+def test_plan_multiple_equivalence_groups():
+    # 4x2 left：final face 为 x∈[0,2)；轨道分别为 {0,3}、{1,2}
+    res = plan_punches(4, 2, ["left"], [(3, 0), (2, 1), (0, 0), (1, 1)])
+    assert res["punches"] == [{"x": 0, "y": 0}, {"x": 1, "y": 1}]
+    assert res["punch_count"] == 2
+    assert res["unique_holes"] == 4
+
+
+def test_plan_missing_symmetric_hole():
+    with pytest.raises(FoldError) as exc_info:
+        plan_punches(8, 4, ["left", "down"], [(1, 1), (1, 2), (6, 1)])
+    err = exc_info.value
+    assert err.code == "incomplete_equivalence_group"
+    assert err.context["equivalent"] == {"x": 1, "y": 0}
+    assert err.context["missing"] == [{"x": 6, "y": 2}]
+    assert err.context["extra"] == []
+
+
+def test_plan_reports_first_incomplete_group_in_sorted_order():
+    # (2,1)/(5,1) 属于等价组 (2,0)（同样不完整），(1,*)/(6,1) 属于 (1,0)；
+    # 等价组按局部坐标排序，(1,0) 在前，故先报告它缺失 (6,2)。
+    with pytest.raises(FoldError) as exc_info:
+        plan_punches(
+            8,
+            4,
+            ["left", "down"],
+            [(2, 1), (5, 1), (1, 1), (1, 2), (6, 1)],
+        )
+    err = exc_info.value
+    assert err.code == "incomplete_equivalence_group"
+    assert err.context["equivalent"] == {"x": 1, "y": 0}
+    assert err.context["missing"] == [{"x": 6, "y": 2}]
+
+
+def test_plan_target_out_of_bounds():
+    with pytest.raises(FoldError) as exc_info:
+        plan_punches(4, 4, ["left"], [(4, 0)])
+    err = exc_info.value
+    assert err.code == "target_out_of_bounds"
+    assert err.context["target"] == 0
+    assert err.context["x"] == 4
+    assert err.context["y"] == 0
+
+
+def test_plan_no_folds_passthrough():
+    res = plan_punches(3, 3, [], [(2, 1), (2, 1)])
+    assert res["punches"] == [{"x": 2, "y": 1}]
+    assert res["targets"] == [{"x": 2, "y": 1}]
+    assert res["punch_count"] == 1
+
+
+def test_plan_all_fold_directions_roundtrip():
+    # 用 unfold 生成轨道，再规划，必须回到同一组打孔点
+    cases = [
+        (["right"], (4, 1), [(0, 0), (1, 0)]),
+        (["up"], (1, 4), [(0, 0), (0, 1)]),
+        (["down"], (4, 4), [(0, 0), (1, 1)]),
+        (["right", "up"], (8, 6), [(0, 0), (1, 1)]),
+    ]
+    for folds, board, punches in cases:
+        w, h = board
+        forward = unfold_board(w, h, folds, punches)
+        orbit = [(hole["x"], hole["y"]) for hole in forward["holes"]]
+        plan = plan_punches(w, h, folds, orbit)
+        assert plan["punches"] == [{"x": x, "y": y} for x, y in sorted(punches)]
+        assert {(p["x"], p["y"]) for p in plan["targets"]} == set(orbit)
+
+
+def test_plan_odd_axis_rejected():
+    with pytest.raises(FoldError) as exc_info:
+        plan_punches(3, 2, ["left"], [(0, 0), (2, 0)])
+    assert exc_info.value.code == "odd_fold_axis"
+
+
+def test_plan_partial_orbits_from_two_groups():
+    # 两组各只给一个点，首个（按局部坐标排序）不完整组即报错
+    with pytest.raises(FoldError) as exc_info:
+        plan_punches(4, 2, ["left"], [(0, 0), (2, 0)])
+    err = exc_info.value
+    assert err.code == "incomplete_equivalence_group"
+    # 局部 (0,0) 的轨道是 {(0,0),(3,0)}
+    assert err.context["equivalent"] == {"x": 0, "y": 0}
+    assert err.context["missing"] == [{"x": 3, "y": 0}]

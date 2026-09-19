@@ -4,6 +4,8 @@
 
 返回内容：展开后的唯一孔位、每个孔位的覆盖层数，以及每个孔位的来源路径（来自哪个打孔点、每一步折叠走了哪一侧）。
 
+此外提供**反向打孔规划**接口 `POST /api/v1/punch-plan`：给定期望出现在展开板材上的目标孔位，沿折叠过程归并到最终折叠面的等价位置并逐组校验镜像完整性，反推出最小且唯一的打孔点列表；目标缺少对称孔或含越界坐标时直接返回 400，**不会默默补孔**。
+
 ## 快速开始
 
 只需一条命令（依赖随容器构建自动安装）：
@@ -16,7 +18,8 @@ docker compose up --build
 
 - API 交互文档（Swagger UI）：http://localhost:8000/docs
 - 健康检查：http://localhost:8000/health
-- 业务接口：`POST http://localhost:8000/api/v1/unfold`
+- 正向展开接口：`POST http://localhost:8000/api/v1/unfold`
+- 反向打孔规划接口：`POST http://localhost:8000/api/v1/punch-plan`
 
 停止服务：`docker compose down`。
 
@@ -27,8 +30,9 @@ docker compose up --build
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `MAX_FOLDS` | `20` | 单次请求允许的最大折叠步数 |
-| `MAX_PUNCHES` | `200` | 单次请求允许的最大打孔点数 |
-| `MAX_TOTAL_HOLES` | `200000` | 展开后孔位总数（打孔点数 × 2^折叠步数）上限 |
+| `MAX_PUNCHES` | `200` | 单次请求允许的最大打孔点数（`/unfold`） |
+| `MAX_TARGETS` | `4096` | 单次请求允许的最大目标孔位数（`/punch-plan`，去重前） |
+| `MAX_TOTAL_HOLES` | `200000` | 展开后孔位总数（打孔点数 × 2^折叠步数）上限；`/punch-plan` 中用于限制单个镜像轨道大小 |
 
 端口映射在 `compose.yaml` 中为 `"8000:8000"`，如需修改对外端口，调整冒号左侧即可。
 
@@ -126,6 +130,104 @@ curl -X POST http://localhost:8000/api/v1/unfold \
   }
 }
 ```
+
+### `POST /api/v1/punch-plan`
+
+反向打孔规划：已知希望在**展开后的原始板材**上出现哪些孔位，反推最终折叠面上应该在哪里打孔。
+
+处理流程：
+
+1. 目标孔位**去重**；
+2. 沿折叠过程把每个目标孔位**正向归并**到最终折叠面的局部坐标，同一局部坐标的目标构成一个**等价组**；
+3. 复用 `/api/v1/unfold` 的展开逻辑复算每个等价位置的**完整镜像轨道**，逐组核对目标集合是否与轨道**恰好相等**；
+4. 仅当**每个等价组都完整**且整体复算结果与目标集合完全一致时，返回**最小且唯一**的打孔点列表（稳定按 `(x, y)` 排序）。
+
+任何等价组缺少对称孔（或包含不属于该轨道的多余坐标）都会返回 400 并列出**首个不完整等价组**的 `missing` / `extra` 坐标，**服务端不会默默补孔**。
+
+**请求体**
+
+```json
+{
+  "board": { "width": 8, "height": 4 },
+  "folds": ["left", "down"],
+  "targets": [
+    { "x": 1, "y": 1 },
+    { "x": 1, "y": 2 },
+    { "x": 6, "y": 1 },
+    { "x": 6, "y": 2 }
+  ]
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `board` | 原始板材的整数网格尺寸，`width`/`height` 为正整数 |
+| `folds` | 按执行顺序给出的对折方向：`up` / `down` / `left` / `right`，可为空数组 |
+| `targets` | 期望在展开板材上出现的目标孔位，使用**原始板材坐标**（左上角 `(0,0)`），至少 1 个；重复坐标会被去重，必须全部落在板材范围内 |
+
+**成功响应示例**（节选）
+
+```json
+{
+  "final_face": { "x": 0, "y": 2, "width": 4, "height": 2 },
+  "targets": [
+    { "x": 1, "y": 1 },
+    { "x": 1, "y": 2 },
+    { "x": 6, "y": 1 },
+    { "x": 6, "y": 2 }
+  ],
+  "punches": [{ "x": 1, "y": 0 }],
+  "punch_count": 1,
+  "stack_layers": 4,
+  "total_holes": 4,
+  "unique_holes": 4,
+  "holes": [ ... ]
+}
+```
+
+| 响应字段 | 说明 |
+| --- | --- |
+| `targets` | 去重并按 `(x, y)` 稳定排序后的目标孔位 |
+| `punches` | 最小且唯一的打孔点列表（最终折叠面**局部坐标**，稳定排序）；其展开复算结果与 `targets` 完全一致 |
+| `punch_count` | 去重后的打孔点数量 |
+| `final_face` / `stack_layers` / `total_holes` / `unique_holes` / `holes` | 用规划出的打孔点调用展开逻辑的复算结果，字段含义同 `/api/v1/unfold` |
+
+**curl 示例**
+
+```bash
+curl -X POST http://localhost:8000/api/v1/punch-plan \
+  -H "Content-Type: application/json" \
+  -d '{
+    "board": {"width": 8, "height": 4},
+    "folds": ["left", "down"],
+    "targets": [
+      {"x": 1, "y": 1}, {"x": 1, "y": 2},
+      {"x": 6, "y": 1}, {"x": 6, "y": 2}
+    ]
+  }'
+```
+
+**缺少对称孔的错误响应**（上面请求去掉 `(6,2)` 时返回 400）
+
+```json
+{
+  "detail": {
+    "error": "incomplete_equivalence_group",
+    "message": "折叠面等价位置 (1, 0) 的等价组未形成完整镜像轨道：缺失 1 个对称孔位，多余 0 个坐标；请补齐或修正目标，服务端不会自动补孔。",
+    "equivalent": { "x": 1, "y": 0 },
+    "missing": [{ "x": 6, "y": 2 }],
+    "extra": []
+  }
+}
+```
+
+**错误响应**
+
+- `400 incomplete_equivalence_group`：首个不完整等价组，`detail` 中带 `equivalent`（折叠面局部坐标）、`missing`（缺失的对称孔坐标）、`extra`（多余坐标）。
+- `400 target_out_of_bounds`：目标孔位超出原始板材范围，带 `target` / `x` / `y` / `board_width` / `board_height`。
+- `400 odd_fold_axis`：同 `/api/v1/unfold`。
+- `400 limit_exceeded`：超出 `MAX_FOLDS` / `MAX_TARGETS` / `MAX_TOTAL_HOLES` 限制。
+- `422`：请求体不符合 schema（如非法方向、负坐标、空目标列表）。
 
 ## 本地开发（不用 Docker）
 

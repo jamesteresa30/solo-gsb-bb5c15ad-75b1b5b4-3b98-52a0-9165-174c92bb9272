@@ -8,5 +8,6 @@ services:
     environment:
       MAX_FOLDS: "20"
       MAX_PUNCHES: "200"
+      MAX_TARGETS: "4096"
       MAX_TOTAL_HOLES: "200000"
     restart: unless-stopped

@@ -112,3 +112,155 @@ def test_duplicate_punches_merged_with_paths():
     for hole in body["holes"]:
         assert hole["layers"] == 2
         assert {p["punch"] for p in hole["paths"]} == {0, 1}
+
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/punch-plan
+# ---------------------------------------------------------------------------
+
+
+def test_punch_plan_ok():
+    resp = client.post(
+        "/api/v1/punch-plan",
+        json={
+            "board": {"width": 8, "height": 4},
+            "folds": ["left", "down"],
+            "targets": [
+                {"x": 1, "y": 1},
+                {"x": 1, "y": 2},
+                {"x": 6, "y": 1},
+                {"x": 6, "y": 2},
+            ],
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["punches"] == [{"x": 1, "y": 0}]
+    assert body["punch_count"] == 1
+    # 响应稳定排序
+    assert [(t["x"], t["y"]) for t in body["targets"]] == [
+        (1, 1),
+        (1, 2),
+        (6, 1),
+        (6, 2),
+    ]
+    assert body["unique_holes"] == 4
+    coords = {(h["x"], h["y"]) for h in body["holes"]}
+    assert coords == {(1, 1), (1, 2), (6, 1), (6, 2)}
+    assert body["final_face"] == {"x": 0, "y": 2, "width": 4, "height": 2}
+
+
+def test_punch_plan_deduplicates_targets():
+    resp = client.post(
+        "/api/v1/punch-plan",
+        json={
+            "board": {"width": 4, "height": 2},
+            "folds": ["left"],
+            "targets": [
+                {"x": 3, "y": 0},
+                {"x": 0, "y": 0},
+                {"x": 0, "y": 0},
+            ],
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["punches"] == [{"x": 0, "y": 0}]
+    assert body["targets"] == [{"x": 0, "y": 0}, {"x": 3, "y": 0}]
+
+
+def test_punch_plan_missing_symmetric_hole_returns_400():
+    resp = client.post(
+        "/api/v1/punch-plan",
+        json={
+            "board": {"width": 8, "height": 4},
+            "folds": ["left", "down"],
+            "targets": [
+                {"x": 1, "y": 1},
+                {"x": 1, "y": 2},
+                {"x": 6, "y": 1},
+            ],
+        },
+    )
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert detail["error"] == "incomplete_equivalence_group"
+    assert detail["equivalent"] == {"x": 1, "y": 0}
+    assert detail["missing"] == [{"x": 6, "y": 2}]
+    assert detail["extra"] == []
+
+
+def test_punch_plan_target_out_of_bounds_returns_400():
+    resp = client.post(
+        "/api/v1/punch-plan",
+        json={
+            "board": {"width": 4, "height": 4},
+            "folds": ["left"],
+            "targets": [{"x": 0, "y": 0}, {"x": 4, "y": 0}],
+        },
+    )
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert detail["error"] == "target_out_of_bounds"
+    assert detail["x"] == 4
+
+
+def test_punch_plan_odd_axis_returns_400():
+    resp = client.post(
+        "/api/v1/punch-plan",
+        json={
+            "board": {"width": 3, "height": 2},
+            "folds": ["left"],
+            "targets": [{"x": 0, "y": 0}],
+        },
+    )
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["error"] == "odd_fold_axis"
+
+
+def test_punch_plan_empty_targets_returns_422():
+    resp = client.post(
+        "/api/v1/punch-plan",
+        json={"board": {"width": 4, "height": 4}, "folds": [], "targets": []},
+    )
+    assert resp.status_code == 422
+
+
+def test_punch_plan_negative_target_returns_422():
+    resp = client.post(
+        "/api/v1/punch-plan",
+        json={
+            "board": {"width": 4, "height": 4},
+            "folds": [],
+            "targets": [{"x": -1, "y": 0}],
+        },
+    )
+    assert resp.status_code == 422
+
+
+def test_punch_plan_invalid_direction_returns_422():
+    resp = client.post(
+        "/api/v1/punch-plan",
+        json={
+            "board": {"width": 4, "height": 4},
+            "folds": ["sideways"],
+            "targets": [{"x": 0, "y": 0}],
+        },
+    )
+    assert resp.status_code == 422
+
+
+def test_punch_plan_no_folds():
+    resp = client.post(
+        "/api/v1/punch-plan",
+        json={
+            "board": {"width": 3, "height": 3},
+            "folds": [],
+            "targets": [{"x": 2, "y": 1}, {"x": 0, "y": 0}],
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["punches"] == [{"x": 0, "y": 0}, {"x": 2, "y": 1}]
+    assert body["punch_count"] == 2
+    assert body["unique_holes"] == 2
