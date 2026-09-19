@@ -101,6 +101,57 @@ class UnfoldResponse(BaseModel):
     holes: List[Hole]
 
 
+class TargetHole(BaseModel):
+    """期望在展开板材上出现的目标孔位，使用原始板材坐标。"""
+
+    x: int = Field(..., ge=0, examples=[1])
+    y: int = Field(..., ge=0, examples=[1])
+
+
+class PunchPlanRequest(BaseModel):
+    board: Board
+    folds: List[FoldDirection] = Field(
+        default_factory=list,
+        max_length=64,
+        description="按执行顺序给出的折叠方向序列",
+    )
+    targets: List[TargetHole] = Field(
+        ...,
+        min_length=1,
+        max_length=4096,
+        description="期望在展开板材上出现的目标孔位（原始板材坐标），服务端自动去重",
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "board": {"width": 8, "height": 4},
+                    "folds": ["left", "down"],
+                    "targets": [
+                        {"x": 1, "y": 1},
+                        {"x": 1, "y": 2},
+                        {"x": 6, "y": 1},
+                        {"x": 6, "y": 2},
+                    ],
+                }
+            ]
+        }
+    }
+
+
+class PunchPlanResponse(BaseModel):
+    board: Board
+    folds: List[FoldDirection]
+    final_face: FaceRegion
+    stack_layers: int = Field(..., description="折叠后每处的纸层数 = 2^len(folds)")
+    target_count: int = Field(..., description="去重后的目标孔位数")
+    punch_count: int = Field(..., description="最小打孔点数（等价组数）")
+    punches: List[PunchPoint] = Field(
+        ..., description="最终折叠面上的打孔点（局部坐标），按 (x, y) 稳定排序"
+    )
+
+
 class ErrorDetail(BaseModel):
     error: str
     message: str
